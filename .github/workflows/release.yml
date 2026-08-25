@@ -1,11 +1,13 @@
 name: Build and Release
 
 on:
+  workflow_dispatch:
   push:
-    branches:
-      - main
     tags:
       - "v*"
+
+permissions:
+  contents: read
 
 jobs:
   release:
@@ -16,6 +18,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -56,7 +60,8 @@ jobs:
           if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
             echo "Bootstrapping Gradle wrapper..."
             mkdir -p gradle/wrapper
-            curl -sSL "https://github.com/gradle/gradle/raw/v8.7.0/gradle/wrapper/gradle-wrapper.jar" \
+            curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 \
+              "https://github.com/gradle/gradle/raw/v8.7.0/gradle/wrapper/gradle-wrapper.jar" \
               -o gradle/wrapper/gradle-wrapper.jar
             echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
             echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
@@ -76,9 +81,10 @@ jobs:
           BDS_KEYSTORE: ${{ secrets.BDS_KEYSTORE }}
         run: |
           if [ -n "$BDS_KEYSTORE" ]; then
-            echo "$BDS_KEYSTORE" | base64 --decode > android/ci-release.jks
+            printf '%s' "$BDS_KEYSTORE" | base64 --decode > android/ci-release.jks
           else
-            echo "Warning: BDS_KEYSTORE secret is missing. Release build might fail or be unsigned."
+            echo "BDS_KEYSTORE secret is required for a signed release."
+            exit 1
           fi
 
       - name: Build Android APK
@@ -93,7 +99,7 @@ jobs:
         run: |
           APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -n "$APK_PATH" ]; then
-            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose "$APK_PATH"
+            "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$APK_PATH"
           else
             echo "No release APK found to verify."
             exit 1
@@ -107,28 +113,26 @@ jobs:
 
           APK_SRC=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
 
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             mv better-deepseek-chrome.zip   better-deepseek-chrome-latest.zip
             mv better-deepseek-firefox.zip  better-deepseek-firefox-latest.zip
             cp "$APK_SRC" better-deepseek-android-latest-signed.apk
-            echo "is_tag=false" >> "$GITHUB_OUTPUT"
           else
             mv better-deepseek-chrome.zip   "better-deepseek-chrome-v${VERSION}.zip"
             mv better-deepseek-firefox.zip  "better-deepseek-firefox-v${VERSION}.zip"
             cp "$APK_SRC" "better-deepseek-android-v${VERSION}-signed.apk"
-            echo "is_tag=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update Latest Release
-        if: github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Latest Build
           body: |
-            This release contains the latest automated build from the `main` branch.
+            This release contains the latest explicitly requested build.
 
-            The Android APK is now **digitally signed**. You can install it directly without Play Protect warnings (though you may still need to allow "Unknown Sources" in your browser).
+            The Android APK is digitally signed.
           files: |
             better-deepseek-chrome-latest.zip
             better-deepseek-firefox-latest.zip
@@ -136,18 +140,18 @@ jobs:
           prerelease: true
           make_latest: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Create Versioned Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           body: |
-            This release includes browser extension bundles and a **signed** Android APK.
+            This release includes browser extension bundles and a signed Android APK.
           files: |
             better-deepseek-chrome-v${{ steps.prep.outputs.version }}.zip
             better-deepseek-firefox-v${{ steps.prep.outputs.version }}.zip
             better-deepseek-android-v${{ steps.prep.outputs.version }}-signed.apk
           generate_release_notes: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
